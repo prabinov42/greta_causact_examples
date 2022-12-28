@@ -1,0 +1,396 @@
+---
+title: "Greta and Causact: Some Examples"
+author: "Peter Rabinovitch"
+date: "`r Sys.time()`"
+output: github_document
+always_allow_html: true
+---
+
+
+# Introduction
+
+About a year ago I wrote a [post](https://prabinov42.github.io/posts/greta_and_causact/) abut using the *causact* R library, which uses the *greta* library, which uses *TensorFlow* to estimate Bayesian models.  
+
+As I have had spare time I have converted several of the [greta examples](https://greta-stats.org/articles/example_models.html) into causact code. I plan to do more as time allows....including cleaning it up a bit with more explanations.
+
+Each example follows the same pattern: duplicate the greta model from the examples page, run it and pull out some results. Then repeat the model in causact, display the graph (love these), and pull out some results.
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(bayesplot)
+library(greta)
+library(causact)
+```
+
+# Example 1: Linear regression
+
+```{r}
+# A simple, one-variable Bayesian linear regression model using the attitude data
+
+# greta
+# variables & priors
+data("attitude")
+int <- normal(0, 10)
+coef <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+# linear predictor
+mu <- int + coef * attitude$complaints
+# observation model
+distribution(attitude$rating) <- normal(mu, sd)
+gretaModel <- model(int, coef, sd, mu) # MODEL
+draws <- mcmc(gretaModel)
+tidyDrawsDF <- bind_rows(
+  draws$`11` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 1) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`12` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 2) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`13` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 3) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`14` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 4) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value")
+)
+
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(param == "coef") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "int") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "sd") %>%
+  pull(value) %>%
+  mean()
+
+# causact
+df <- attitude %>% select(rating, complaints)
+graph <- dag_create() %>%
+  dag_node("rating", "rating", rhs = normal(mu, sd), data = df$rating) %>%
+  dag_node("mu", "mu", rhs = int + coef * complaints, child = "rating") %>%
+  dag_node("sd", "sd", rhs = cauchy(0, 3, truncation = c(0, Inf)), child = "rating") %>%
+  dag_node("int", "int", rhs = normal(0, 10), child = "mu") %>%
+  dag_node("coef", "coef", rhs = normal(0, 10), child = "mu") %>%
+  dag_node("complaints", "complaints", data = df$complaints, child = "mu") %>%
+  dag_plate("Observations", "i", nodeLabels = c("rating", "complaints", "mu"))
+graph %>% dag_render()
+set.seed(2022)
+drawsDF <- graph %>% dag_greta(mcmc = TRUE)
+drawsDF %>% dagp_plot()
+```
+
+# Example 2: Multiple linear regression
+
+```{r}
+# A multi-variable Bayesian linear regression model using the attitude data
+# greta
+data(attitude)
+design <- as.matrix(attitude[, 2:7])
+int <- normal(0, 10)
+coefs <- normal(0, 10, dim = ncol(design))
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+# matrix multiplication is more efficient than multiplying the coefficients
+# separately
+mu <- int + design %*% coefs
+distribution(attitude$rating) <- normal(mu, sd)
+gretaModel <- model(int, coefs, sd) # MODEL
+draws <- mcmc(gretaModel)
+tidyDrawsDF <- replaceLabels(draws) %>%
+  as.matrix() %>%
+  as_tibble() %>%
+  addPriorGroups()
+tidyDrawsDF %>% glimpse()
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(param == "coefs[1,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "coefs[6,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "int") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "sd") %>%
+  pull(value) %>%
+  mean()
+
+tidyDrawsDF <- bind_rows(
+  draws$`11` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 1) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`12` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 2) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`13` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 3) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`14` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 4) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value")
+)
+
+# causact
+design <- as.matrix(attitude[, 2:7])
+graph <- dag_create() %>%
+  dag_node("rating", "rating", rhs = normal(mu, sd), data = df$rating) %>%
+  dag_node("mu", "mu", rhs = int + design %*% coefs, child = "rating") %>%
+  dag_node("sd", "sd", rhs = cauchy(0, 3, truncation = c(0, Inf)), child = "rating") %>%
+  dag_node("int", "int", rhs = normal(0, 10), child = "mu") %>%
+  dag_node("coefs", "coefs", rhs = normal(0, 10, dim = ncol(design)), child = "mu") %>%
+  dag_node("design", "design", data = design, child = "mu", keepAsDF = TRUE) %>%
+  dag_plate("Observations", "i", nodeLabels = c("rating", "design", "mu"))
+graph %>% dag_render()
+set.seed(2022)
+drawsDF <- graph %>% dag_greta(mcmc = TRUE)
+drawsDF %>% dagp_plot()
+#
+# #or
+# graph <- dag_create() %>%
+#   dag_node("rating", "rating", rhs = normal(mu, sd), data = df$rating) %>%
+#   dag_node("mu", "mu", rhs = int+design %*% coefs, child = "rating") %>%
+#   dag_node("sd", "sd", rhs = cauchy(0,3,truncation = c(0, Inf)), child = "rating") %>%
+#   dag_node("int", "int", rhs = normal(0,10), child = "mu") %>%
+#   dag_node("coefs", "coefs", rhs = normal(0,10, dim=ncol(design)), child = "mu") %>%
+#   dag_node("design", "design", data = design, child = "mu") %>%
+#   dag_plate("Observations", "i", nodeLabels = c("rating","design","mu"))
+```
+
+# Example 3: Multiple Poisson regression
+
+```{r}
+# A multiple Bayesian linear regression model using the warpbreaks data.
+# greta
+data("warpbreaks")
+X <- as_data(model.matrix(breaks ~ wool + tension, warpbreaks))
+y <- as_data(warpbreaks$breaks)
+int <- variable()
+coefs <- normal(0, 5, dim = ncol(X) - 1)
+beta <- c(int, coefs)
+eta <- X %*% beta
+distribution(y) <- poisson(exp(eta))
+gretaModel <- model(int, coefs, eta)
+draws <- mcmc(gretaModel)
+tidyDrawsDF <- replaceLabels(draws) %>%
+  as.matrix() %>%
+  as_tibble() %>%
+  addPriorGroups()
+tidyDrawsDF %>% glimpse()
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(param == "coefs[1,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "eta[13,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "int") %>%
+  pull(value) %>%
+  mean()
+
+tidyDrawsDF <- bind_rows(
+  draws$`11` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 1) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`12` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 2) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`13` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 3) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value"),
+  draws$`14` %>% as.matrix() %>% as_tibble() %>% rowid_to_column() %>% mutate(chain = 4) %>%
+    pivot_longer(cols = -c(rowid, chain), names_to = "param", values_to = "value")
+)
+#
+
+# causact
+XX <- model.matrix(breaks ~ wool + tension, warpbreaks)
+yy <- warpbreaks$breaks
+graph <- dag_create() %>%
+  dag_node("yy", "yy", rhs = poisson(exp(eta)), data = yy) %>%
+  dag_node("eta", "eta", rhs = XX %*% beta, child = "yy") %>%
+  dag_node("beta", "beta", rhs = c(int, coefs), child = "eta") %>%
+  dag_node("int", "int", rhs = normal(0, 1), child = "beta") %>% # variable() in causact it wants lower & upper
+  dag_node("coefs", "coefs", rhs = normal(0, 5, dim = ncol(XX) - 1), child = "beta") %>%
+  dag_node("XX", "XX", data = XX, child = "eta", keepAsDF = TRUE) %>%
+  dag_plate("Observations", "i", nodeLabels = c("yy", "eta", "XX"))
+graph %>% dag_render()
+set.seed(2022)
+drawsDF <- graph %>% dag_greta(mcmc = TRUE)
+drawsDF %>% dagp_plot()
+drawsDF %>% glimpse()
+```
+
+# Example 4: Multiple categorical regression
+
+```{r}
+# A multi-variable Bayesian categorical regression model using the iris data.
+
+# greta
+data(iris)
+X <- as_data(cbind(1, iris[, 1:4]))
+y <- model.matrix(~ Species - 1, iris)
+P <- ncol(X)
+K <- ncol(y)
+beta <- normal(0, 5, dim = c(P, K - 1))
+eta <- X %*% beta
+prob <- imultilogit(eta)
+distribution(y) <- categorical(prob)
+gretaModel <- model(prob, eta, beta) # MODEL
+draws <- mcmc(gretaModel)
+tidyDrawsDF <- replaceLabels(draws) %>%
+  as.matrix() %>%
+  as_tibble() %>%
+  addPriorGroups()
+tidyDrawsDF %>% glimpse()
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(param == "eta[90,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "eta[90,2]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "prob[90,1]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "prob[90,2]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>%
+  filter(param == "prob[90,3]") %>%
+  pull(value) %>%
+  mean()
+tidyDrawsDF %>% glimpse()
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(str_detect(param, "beta")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value))
+
+# causact
+XX <- cbind(1, iris[, 1:4]) %>% as.matrix()
+yy <- model.matrix(~ Species - 1, iris)
+P <- ncol(XX)
+K <- ncol(yy)
+graph <- dag_create() %>%
+  dag_node("yy", "yy", rhs = categorical(prob), data = yy) %>%
+  dag_node("prob", "prob", rhs = imultilogit(eta), child = "yy") %>%
+  dag_node("eta", "eta", rhs = XX %*% beta, child = "prob") %>%
+  dag_node("XX", "XX", data = XX, child = "eta") %>%
+  dag_node("beta", "beta", rhs = normal(0, 5, dim = c(P, K - 1)), child = "eta") %>%
+  dag_plate("Observations", "i", nodeLabels = c("yy", "XX", "eta", "prob"))
+graph %>% dag_render()
+set.seed(2022)
+drawsDF <- graph %>% dag_greta(mcmc = TRUE)
+drawsDF %>% dagp_plot()
+drawsDF %>% glimpse()
+```
+
+I don't know why the graph %>% dag_render() yields extra nodes :(
+
+# Example 5: Multiple linear regression with LASSO prior
+
+```{r}
+# A multi-variable Bayesian linear regression model using an exponential-normal prior for the coefficients.
+
+# greta
+data(attitude)
+design <- as.matrix(attitude[, 2:7])
+int <- normal(0, 10)
+sd <- cauchy(0, 3, truncation = c(0, Inf))
+tau <- exponential(0.5, dim = ncol(design))
+coefs <- normal(0, tau)
+mu <- int + design %*% coefs
+distribution(attitude$rating) <- normal(mu, sd)
+gretaModel <- model(int, sd, tau, coefs, mu)
+draws <- mcmc(gretaModel)
+tidyDrawsDF <- replaceLabels(draws) %>%
+  as.matrix() %>%
+  as_tibble() %>%
+  addPriorGroups()
+tidyDrawsDF %>% glimpse()
+tidyDrawsDF %>%
+  pull(param) %>%
+  unique()
+tidyDrawsDF %>%
+  filter(str_detect(param, "coefs")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value), sd = sd(value))
+tidyDrawsDF %>%
+  filter(str_detect(param, "int")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value), sd = sd(value))
+tidyDrawsDF %>%
+  filter(str_detect(param, "sd")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value), sd = sd(value))
+tidyDrawsDF %>%
+  filter(str_detect(param, "tau")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value), sd = sd(value))
+tidyDrawsDF %>%
+  filter(str_detect(param, "mu")) %>%
+  group_by(param) %>%
+  summarize(mn = mean(value), sd = sd(value))
+
+# causact
+design <- as.matrix(attitude[, 2:7])
+graph <- dag_create() %>%
+  dag_node("rating", "rating", rhs = normal(mu, sd), data = attitude$rating) %>%
+  dag_node("mu", "mu", rhs = int + design %*% coefs, child = "rating") %>%
+  dag_node("sd", "sd", rhs = cauchy(0, 3, truncation = c(0, Inf)), child = "rating") %>%
+  dag_node("coefs", "coefs", rhs = normal(0, tau, dim = ncol(design)), child = "mu") %>%
+  dag_node("tau", "tau", rhs = exponential(0.5, dim = ncol(design)), child = "coefs") %>%
+  dag_node("int", "int", rhs = normal(0, 10), child = "mu") %>%
+  dag_node("design", "design", data = design, child = "mu", keepAsDF = TRUE) %>%
+  dag_plate("Observations", "i", nodeLabels = c("rating", "design", "mu"))
+graph %>% dag_render()
+set.seed(2022)
+drawsDF <- graph %>% dag_greta(mcmc = TRUE)
+drawsDF %>% dagp_plot()
+```
+
+
+
+# Appendices
+
+<details>
+
+<summary>
+
+References
+
+</summary>
+
+[greta](https://greta-stats.org/index.html)  
+[causact](https://www.causact.com/)  
+
+</details>
+
+<details>
+
+<summary>
+
+SessionInfo
+
+</summary>
+
+```{r}
+sessionInfo()
+```
+
+</details>
